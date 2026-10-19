@@ -196,14 +196,16 @@ jobs:
           node scripts/build-web.js > /dev/null
           # the Xcode project, created here (no Mac to store it on)
           npx tauri ios init --ci ${CONFIG:+--config "$CONFIG"} > init.log 2>&1 || { tail -30 init.log; exit 1; }
+          tail -15 init.log
           cd src-tauri/gen/apple
+          ls -la . *.xcodeproj
           proj=$(ls -d *.xcodeproj | head -1)
           scheme="$(basename "$proj" .xcodeproj)_iOS"
           # unsigned: the sideloading app signs it with the user's Apple ID
           xcodebuild -project "$proj" -scheme "$scheme" -configuration release -sdk iphoneos \
             -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
-            || { grep -E "error|failed" build.log | grep -v "^warning" | head -40; exit 1; }
+            || { grep -E "error:|failed|BUILD FAILED" build.log | head -40; tail -20 build.log; exit 1; }
           app=$(ls -d build/Build/Products/*-iphoneos/*.app | head -1)
           mkdir -p Payload ../../../../out
           cp -R "$app" Payload/
