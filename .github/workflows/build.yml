@@ -1,12 +1,14 @@
 name: build
 
-# star builds for Mac (macOS, iOS) or Linux. The source is not in this repo: each run
-# checks it out using read-only keys stored as this repo's secrets (SRC_REPO /
-# SRC_KEY: the app; PLUGIN_REPO / PLUGIN_KEY: a plugin with a built macOS
-# backend). Triggered solely by workflow_dispatch (manual start): no execution
-# on pull requests, preventing others' code from accessing the keys. Logs are
-# concise (suppressing warnings that quote source); outputs persist for one
-# day.
+# star's builds for Mac (macOS, iOS) or Linux. The source code is not
+# stored in this repository; each run checks it out using read-only keys
+# stored as repository secrets (SRC_REPO / SRC_KEY for the app; PLUGIN_REPO
+# / PLUGIN_KEY for a plugin, whose library is built for macOS or integrated
+# into the iOS app; PLUGIN_ID for its identifier). Execution is initiated
+# manually via workflow_dispatch only: no workflows trigger on pull
+# requests, ensuring external code never accesses the keys. Every job masks
+# the plugin ID in its logs; built artifacts are encrypted using
+# ARTIFACT_KEY before retention for one day.
 
 on:
   workflow_dispatch:
@@ -27,12 +29,16 @@ on:
         type: boolean
         default: false
       ios:
-        description: iOS app (unsigned .ipa, for sideloading)
+        description: iOS app (unsigned .ipa, for sideloading), the plugin built in
         type: boolean
         default: false
       plugin:
-        description: the plugin's commit for its macOS backend (empty, none)
+        description: the plugin's commit ("published", its source's version; empty, none)
         default: ''
+      plugin_mac:
+        description: the plugin's macOS library
+        type: boolean
+        default: false
       build:
         description: the build id (names what's built; empty, none)
         default: ''
@@ -47,12 +53,18 @@ env:
   CARGO_TERM_QUIET: 'true'
   RUSTFLAGS: -Awarnings
   STAR_BUILD_ID: ${{ inputs.build }}
+  # the location where the version of a published plugin is listed
+  SOURCE: https://v15.studio/star-plugins/index.json
 
 jobs:
   check:
     if: inputs.check
     runs-on: macos-14
     steps:
+      - name: mask
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: for v in "$ID" "$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "$(echo "$ID" | tr a-z A-Z)"; do echo "::add-mask::$v"; done
       - uses: actions/checkout@v5
         with:
           repository: ${{ secrets.SRC_REPO }}
@@ -78,6 +90,10 @@ jobs:
     if: inputs.mac
     runs-on: macos-14
     steps:
+      - name: mask
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: for v in "$ID" "$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "$(echo "$ID" | tr a-z A-Z)"; do echo "::add-mask::$v"; done
       - uses: actions/checkout@v5
         with:
           repository: ${{ secrets.SRC_REPO }}
@@ -97,10 +113,10 @@ jobs:
             webaudio/src-tauri/target
           key: mac-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
           restore-keys: mac-
-      # Signed with star's own certificate (MAC_CERT) rather than a developer
-      # ID's: the same for every build, so macOS retains star's permissions
-      # (the mic, the camera) across updates. Trusted here only, for codesign
-      # to take it.
+      # Signed with star's own certificate (MAC_CERT), not a developer ID:
+      # consistent across every build, allowing macOS to retain star's
+      # permissions (mic, camera) through updates. Trusted on this runner only, for
+      # codesign to accept it.
       - name: signing identity
         env:
           P12: ${{ secrets.MAC_CERT }}
@@ -130,6 +146,10 @@ jobs:
           npx tauri build ${CONFIG:+--config "$CONFIG"} --target universal-apple-darwin --bundles dmg > build.log 2>&1 || { grep -E "^error|error:" build.log | head -40; exit 1; }
           mkdir -p ../out
           cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg ../out/star.dmg
+      - name: encrypt
+        env:
+          K: ${{ secrets.ARTIFACT_KEY }}
+        run: for f in out/*; do openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: mac
@@ -142,6 +162,10 @@ jobs:
     # The oldest supported image: its glibc determines where packages run.
     runs-on: ubuntu-22.04
     steps:
+      - name: mask
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: for v in "$ID" "$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "$(echo "$ID" | tr a-z A-Z)"; do echo "::add-mask::$v"; done
       - uses: actions/checkout@v5
         with:
           repository: ${{ secrets.SRC_REPO }}
@@ -176,6 +200,10 @@ jobs:
           cp $b/deb/*.deb ../out/star.deb
           cp $b/rpm/*.rpm ../out/star.rpm
           cp $b/appimage/*.AppImage ../out/star.AppImage
+      - name: encrypt
+        env:
+          K: ${{ secrets.ARTIFACT_KEY }}
+        run: for f in out/*; do openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -188,6 +216,10 @@ jobs:
     # Xcode 16: the project Tauri generates uses its format
     runs-on: macos-15
     steps:
+      - name: mask
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: for v in "$ID" "$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "$(echo "$ID" | tr a-z A-Z)"; do echo "::add-mask::$v"; done
       - uses: actions/checkout@v5
         with:
           repository: ${{ secrets.SRC_REPO }}
@@ -199,9 +231,19 @@ jobs:
         if: inputs.plugin != ''
         with:
           repository: ${{ secrets.PLUGIN_REPO }}
-          ref: ${{ inputs.plugin }}
+          ref: ${{ inputs.plugin == 'published' && 'main' || inputs.plugin }}
           ssh-key: ${{ secrets.PLUGIN_KEY }}
           path: plugin
+          fetch-depth: 0
+      - name: the plugin's published version
+        if: inputs.plugin == 'published'
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: |
+          v=$(curl -fsS "$SOURCE" | python3 -c "import json,sys,os; print(next(p['version'] for p in json.load(sys.stdin)['plugins'] if p['id']==os.environ['ID']))")
+          ref=$(git -C plugin log --format=%H -S"\"version\": \"$v\"" -- plugin/plugin.json | tail -1)
+          git -C plugin checkout -q "$ref"
+          echo "the plugin at its published version, $v"
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -238,6 +280,17 @@ jobs:
           xcodegen generate > /dev/null
           proj=$(ls -d *.xcodeproj | head -1)
           scheme="$(basename "$proj" .xcodeproj)_iOS"
+          # the app's own Info.plist keys (src-tauri/Info.plist, Info.ios.plist),
+          # as merged by Tauri's build: the mic's reason, the background audio,
+          # its name
+          python3 - "$(basename "$proj" .xcodeproj)_iOS/Info.plist" ../../Info.plist ../../Info.ios.plist <<'PY'
+          import plistlib, sys, os
+          base = plistlib.load(open(sys.argv[1], 'rb'))
+          for extra in sys.argv[2:]:
+              if os.path.exists(extra):
+                  base.update(plistlib.load(open(extra, 'rb')))
+          plistlib.dump(base, open(sys.argv[1], 'wb'))
+          PY
           # unsigned: the sideloading app signs it with the user's Apple ID
           xcodebuild -project "$proj" -scheme "$scheme" -configuration release -sdk iphoneos \
             -destination 'generic/platform=iOS' -derivedDataPath build \
@@ -258,13 +311,17 @@ jobs:
             install_name_tool -id "@rpath/$lib" "$app/Frameworks/$lib"
             cp -R "$pl/plugin/ui" "$app/plugins/$id/ui"
             cp "$pl/dave-wasm/target/wasm32-unknown-unknown/release/star_dave_wasm.wasm" "$app/plugins/$id/ui/dave.wasm"
-            python3 -c "import json,sys; m=json.load(open(sys.argv[1])); m['backend']={'ios': sys.argv[2]}; json.dump(m, open(sys.argv[3],'w'), indent=2)"               "$pl/plugin/plugin.json" "$lib" "$app/plugins/$id/plugin.json"
-            echo "built in: $(ls "$app/plugins")"
+            python3 -c "import json,sys; m=json.load(open(sys.argv[1])); m['backend']={'ios': sys.argv[2]}; json.dump(m, open(sys.argv[3],'w'), indent=2)" "$pl/plugin/plugin.json" "$lib" "$app/plugins/$id/plugin.json"
+            echo "a plugin built in"
           fi
           plutil -p "$app/Info.plist" | grep -E "CFBundle(DisplayName|Identifier|ShortVersion)|MinimumOS|UIBackgroundModes|UsageDescription|FileSharing" -A2 | head -30
           mkdir -p Payload ../../../../out
           cp -R "$app" Payload/
           zip -qr ../../../../out/star.ipa Payload
+      - name: encrypt
+        env:
+          K: ${{ secrets.ARTIFACT_KEY }}
+        run: for f in out/*; do openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: ios
@@ -273,9 +330,13 @@ jobs:
           if-no-files-found: error
 
   plugin:
-    if: inputs.plugin != ''
+    if: inputs.plugin_mac && inputs.plugin != ''
     runs-on: macos-14
     steps:
+      - name: mask
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: for v in "$ID" "$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "$(echo "$ID" | tr a-z A-Z)"; do echo "::add-mask::$v"; done
       # side by side, as on the PC: the plugin builds against ../webaudio/plugin-abi
       - uses: actions/checkout@v5
         with:
@@ -286,9 +347,19 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: ${{ secrets.PLUGIN_REPO }}
-          ref: ${{ inputs.plugin }}
+          ref: ${{ inputs.plugin == 'published' && 'main' || inputs.plugin }}
           ssh-key: ${{ secrets.PLUGIN_KEY }}
           path: plugin
+          fetch-depth: 0
+      - name: the plugin's published version
+        if: inputs.plugin == 'published'
+        env:
+          ID: ${{ secrets.PLUGIN_ID }}
+        run: |
+          v=$(curl -fsS "$SOURCE" | python3 -c "import json,sys,os; print(next(p['version'] for p in json.load(sys.stdin)['plugins'] if p['id']==os.environ['ID']))")
+          ref=$(git -C plugin log --format=%H -S"\"version\": \"$v\"" -- plugin/plugin.json | tail -1)
+          git -C plugin checkout -q "$ref"
+          echo "the plugin at its published version, $v"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -308,9 +379,14 @@ jobs:
           done
           mkdir -p ../out
           lib=$(cd target/aarch64-apple-darwin/release && ls lib*.dylib | head -1)
-          lipo -create -output ../out/$lib target/aarch64-apple-darwin/release/$lib target/x86_64-apple-darwin/release/$lib
+          # (named plainly: the package re-identifies it)
+          lipo -create -output ../out/plugin.dylib target/aarch64-apple-darwin/release/$lib target/x86_64-apple-darwin/release/$lib
           # Apple silicon executes only signed code: ad hoc
-          codesign -s - -f ../out/$lib
+          codesign -s - -f ../out/plugin.dylib > /dev/null 2>&1
+      - name: encrypt
+        env:
+          K: ${{ secrets.ARTIFACT_KEY }}
+        run: for f in out/*; do openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: plugin-macos
