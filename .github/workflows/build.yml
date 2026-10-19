@@ -1,0 +1,262 @@
+name: build
+
+# star builds for Mac (macOS, iOS) or Linux. The source is not in this repo: each run
+# checks it out using read-only keys stored as this repo's secrets (SRC_REPO /
+# SRC_KEY: the app; PLUGIN_REPO / PLUGIN_KEY: a plugin with a built macOS
+# backend). Triggered solely by workflow_dispatch (manual start): no execution
+# on pull requests, preventing others' code from accessing the keys. Logs are
+# concise (suppressing warnings that quote source); outputs persist for one
+# day.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: the app's commit (or branch)
+        default: main
+      check:
+        description: type-check macOS and iOS only (quick)
+        type: boolean
+        default: true
+      mac:
+        description: macOS app (.dmg)
+        type: boolean
+        default: false
+      linux:
+        description: Linux packages (.deb, .rpm, .AppImage)
+        type: boolean
+        default: false
+      ios:
+        description: iOS app (unsigned .ipa, for sideloading)
+        type: boolean
+        default: false
+      plugin:
+        description: the plugin's commit for its macOS backend (empty, none)
+        default: ''
+      build:
+        description: the build id (names what's built; empty, none)
+        default: ''
+      config:
+        description: Tauri config merged over the app's (JSON)
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_QUIET: 'true'
+  RUSTFLAGS: -Awarnings
+  STAR_BUILD_ID: ${{ inputs.build }}
+
+jobs:
+  check:
+    if: inputs.check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SRC_KEY }}
+          path: webaudio
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,aarch64-apple-ios
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            webaudio/src-tauri/target
+          key: check-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
+          restore-keys: check-
+      - name: macOS
+        run: cargo check --manifest-path webaudio/src-tauri/Cargo.toml --target aarch64-apple-darwin --message-format short
+      - name: iOS
+        run: cargo check --manifest-path webaudio/src-tauri/Cargo.toml --target aarch64-apple-ios --message-format short
+
+  mac:
+    if: inputs.mac
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SRC_KEY }}
+          path: webaudio
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            webaudio/src-tauri/target
+          key: mac-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
+          restore-keys: mac-
+      - name: build
+        working-directory: webaudio
+        # not signed with a developer ID: ad hoc ("-"), so Apple silicon can run
+        # it
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+          CONFIG: ${{ inputs.config }}
+        run: |
+          npm ci --silent
+          node scripts/build-web.js > /dev/null
+          npx tauri build ${CONFIG:+--config "$CONFIG"} --target universal-apple-darwin --bundles dmg > build.log 2>&1 || { grep -E "^error|error:" build.log | head -40; exit 1; }
+          mkdir -p ../out
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg ../out/star.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: out/*
+          retention-days: 1
+          if-no-files-found: error
+
+  linux:
+    if: inputs.linux
+    # The oldest supported image: its glibc determines where packages run.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SRC_KEY }}
+          path: webaudio
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            webaudio/src-tauri/target
+          key: linux-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
+          restore-keys: linux-
+      - name: the system's parts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf rpm > /dev/null
+      - name: build
+        working-directory: webaudio
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          npm ci --silent
+          node scripts/build-web.js > /dev/null
+          npx tauri build ${CONFIG:+--config "$CONFIG"} --bundles deb,rpm,appimage > build.log 2>&1 || { grep -E "^error|error:" build.log | head -40; exit 1; }
+          mkdir -p ../out
+          b=src-tauri/target/release/bundle
+          cp $b/deb/*.deb ../out/star.deb
+          cp $b/rpm/*.rpm ../out/star.rpm
+          cp $b/appimage/*.AppImage ../out/star.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*
+          retention-days: 1
+          if-no-files-found: error
+
+  ios:
+    if: inputs.ios
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SRC_KEY }}
+          path: webaudio
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            webaudio/src-tauri/target
+          key: ios-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
+          restore-keys: ios-
+      - name: build
+        working-directory: webaudio
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          brew install xcodegen > /dev/null 2>&1 || true
+          npm ci --silent
+          node scripts/build-web.js > /dev/null
+          # the Xcode project, created here (no Mac to store it on)
+          npx tauri ios init --ci ${CONFIG:+--config "$CONFIG"} > init.log 2>&1 || { tail -30 init.log; exit 1; }
+          cd src-tauri/gen/apple
+          proj=$(ls -d *.xcodeproj | head -1)
+          scheme="$(basename "$proj" .xcodeproj)_iOS"
+          # unsigned: the sideloading app signs it with the user's Apple ID
+          xcodebuild -project "$proj" -scheme "$scheme" -configuration release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
+            || { grep -E "error|failed" build.log | grep -v "^warning" | head -40; exit 1; }
+          app=$(ls -d build/Build/Products/*-iphoneos/*.app | head -1)
+          mkdir -p Payload ../../../../out
+          cp -R "$app" Payload/
+          zip -qr ../../../../out/star.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: out/*
+          retention-days: 1
+          if-no-files-found: error
+
+  plugin:
+    if: inputs.plugin != ''
+    runs-on: macos-14
+    steps:
+      # side by side, as on the PC: the plugin builds against ../webaudio/plugin-abi
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SRC_KEY }}
+          path: webaudio
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.PLUGIN_REPO }}
+          ref: ${{ inputs.plugin }}
+          ssh-key: ${{ secrets.PLUGIN_KEY }}
+          path: plugin
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            plugin/target
+          key: plugin-${{ hashFiles('plugin/Cargo.lock') }}
+          restore-keys: plugin-
+      - name: build
+        working-directory: plugin
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --lib --target $t --message-format short 2>&1 | grep -E "^error" | head -20
+            test ${PIPESTATUS[0]} -eq 0 || exit 1
+          done
+          mkdir -p ../out
+          lib=$(cd target/aarch64-apple-darwin/release && ls lib*.dylib | head -1)
+          lipo -create -output ../out/$lib target/aarch64-apple-darwin/release/$lib target/x86_64-apple-darwin/release/$lib
+          # Apple silicon executes only signed code: ad hoc
+          codesign -s - -f ../out/$lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-macos
+          path: out/*
+          retention-days: 1
+          if-no-files-found: error
