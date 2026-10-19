@@ -194,18 +194,28 @@ jobs:
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.SRC_KEY }}
           path: webaudio
+      # a built-in plugin (iOS runs only code signed into the app): beside the app's source
+      - uses: actions/checkout@v5
+        if: inputs.plugin != ''
+        with:
+          repository: ${{ secrets.PLUGIN_REPO }}
+          ref: ${{ inputs.plugin }}
+          ssh-key: ${{ secrets.PLUGIN_KEY }}
+          path: plugin
       - uses: actions/setup-node@v5
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios
+          targets: aarch64-apple-ios,wasm32-unknown-unknown
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             webaudio/src-tauri/target
-          key: ios-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
+            plugin/target
+            plugin/dave-wasm/target
+          key: ios-${{ hashFiles('webaudio/src-tauri/Cargo.lock', 'plugin/Cargo.lock') }}
           restore-keys: ios-
       - name: build
         working-directory: webaudio
@@ -234,6 +244,24 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
             || { grep -E "error:|failed|BUILD FAILED" build.log | head -40; tail -20 build.log; exit 1; }
           app=$(ls -d build/Build/Products/*-iphoneos/*.app | head -1)
+          # the built-in plugin: its folder (plugin.json naming its iOS
+          # library, its UI with the frame's cryptor) in the app's plugins/,
+          # the library in its Frameworks/ (the sideloading app signs those)
+          if [ -d "$GITHUB_WORKSPACE/plugin" ]; then
+            pl="$GITHUB_WORKSPACE/plugin"
+            cargo build --manifest-path "$pl/Cargo.toml" --release --lib --target aarch64-apple-ios
+            (cd "$pl/dave-wasm" && cargo build --release --target wasm32-unknown-unknown)
+            lib=$(cd "$pl/target/aarch64-apple-ios/release" && ls lib*.dylib | head -1)
+            id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$pl/plugin/plugin.json")
+            mkdir -p "$app/Frameworks" "$app/plugins/$id"
+            cp "$pl/target/aarch64-apple-ios/release/$lib" "$app/Frameworks/$lib"
+            install_name_tool -id "@rpath/$lib" "$app/Frameworks/$lib"
+            cp -R "$pl/plugin/ui" "$app/plugins/$id/ui"
+            cp "$pl/dave-wasm/target/wasm32-unknown-unknown/release/star_dave_wasm.wasm" "$app/plugins/$id/ui/dave.wasm"
+            python3 -c "import json,sys; m=json.load(open(sys.argv[1])); m['backend']={'ios': sys.argv[2]}; json.dump(m, open(sys.argv[3],'w'), indent=2)"               "$pl/plugin/plugin.json" "$lib" "$app/plugins/$id/plugin.json"
+            echo "built in: $(ls "$app/plugins")"
+          fi
+          plutil -p "$app/Info.plist" | grep -E "CFBundle(DisplayName|Identifier|ShortVersion)|MinimumOS|UIBackgroundModes|UsageDescription|FileSharing" -A2 | head -30
           mkdir -p Payload ../../../../out
           cp -R "$app" Payload/
           zip -qr ../../../../out/star.ipa Payload
