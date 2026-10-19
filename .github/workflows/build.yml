@@ -197,9 +197,15 @@ jobs:
           node scripts/build-web.js > /dev/null
           # the Xcode project, created here (no Mac to store it on)
           npx tauri ios init --ci ${CONFIG:+--config "$CONFIG"} > init.log 2>&1 || { tail -30 init.log; exit 1; }
-          tail -15 init.log
+          # the app's Rust, built here where Xcode would have Tauri build it
+          # (that step needs `tauri ios build`, which wants a signing team):
+          # where the project looks for it, and the step left out
+          TAURI_CONFIG='{"build":{"frontendDist":"../dist"}}' cargo build --manifest-path src-tauri/Cargo.toml --release --lib --target aarch64-apple-ios
           cd src-tauri/gen/apple
-          ls -la . *.xcodeproj
+          mkdir -p Externals/arm64/release
+          cp ../../target/aarch64-apple-ios/release/libapp_lib.a Externals/arm64/release/libapp.a
+          sed -i '' 's/npm run -- tauri ios xcode-script.*/echo "(the Rust is built already)"/' project.yml
+          xcodegen generate > /dev/null
           proj=$(ls -d *.xcodeproj | head -1)
           scheme="$(basename "$proj" .xcodeproj)_iOS"
           # unsigned: the sideloading app signs it with the user's Apple ID
