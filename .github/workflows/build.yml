@@ -165,7 +165,8 @@ jobs:
 
   ios:
     if: inputs.ios
-    runs-on: macos-14
+    # Xcode 16: the project Tauri generates uses its format
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
         with:
