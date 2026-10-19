@@ -97,12 +97,32 @@ jobs:
             webaudio/src-tauri/target
           key: mac-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
           restore-keys: mac-
+      # Signed with star's own certificate (MAC_CERT) rather than a developer
+      # ID's: the same for every build, so macOS retains star's permissions
+      # (the mic, the camera) across updates. Trusted here only, for codesign
+      # to take it.
+      - name: signing identity
+        env:
+          P12: ${{ secrets.MAC_CERT }}
+          PW: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          kc="$RUNNER_TEMP/sign.keychain-db"
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$PW" -T /usr/bin/codesign > /dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc" > /dev/null
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -nokeys -passin env:PW -out "$RUNNER_TEMP/cert.pem" 2>/dev/null \
+            || openssl pkcs12 -legacy -in "$RUNNER_TEMP/cert.p12" -nokeys -passin env:PW -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$kc" | grep -q "star (self-signed)"
       - name: build
         working-directory: webaudio
-        # not signed with a developer ID: ad hoc ("-"), so Apple silicon can run
-        # it
         env:
-          APPLE_SIGNING_IDENTITY: '-'
+          APPLE_SIGNING_IDENTITY: star (self-signed)
           CONFIG: ${{ inputs.config }}
         run: |
           npm ci --silent
