@@ -309,6 +309,7 @@ jobs:
             mkdir -p "$app/Frameworks" "$app/plugins/$id"
             cp "$pl/target/aarch64-apple-ios/release/$lib" "$app/Frameworks/$lib"
             install_name_tool -id "@rpath/$lib" "$app/Frameworks/$lib"
+            strip -x "$app/Frameworks/$lib"
             cp -R "$pl/plugin/ui" "$app/plugins/$id/ui"
             cp "$pl/dave-wasm/target/wasm32-unknown-unknown/release/star_dave_wasm.wasm" "$app/plugins/$id/ui/dave.wasm"
             python3 -c "import json,sys; m=json.load(open(sys.argv[1])); m['backend']={'ios': sys.argv[2]}; json.dump(m, open(sys.argv[3],'w'), indent=2)" "$pl/plugin/plugin.json" "$lib" "$app/plugins/$id/plugin.json"
@@ -381,6 +382,8 @@ jobs:
           lib=$(cd target/aarch64-apple-darwin/release && ls lib*.dylib | head -1)
           # (named plainly: the package re-identifies it)
           lipo -create -output ../out/plugin.dylib target/aarch64-apple-darwin/release/$lib target/x86_64-apple-darwin/release/$lib
+          # (most of it is its debug info)
+          strip -x ../out/plugin.dylib
           # Apple silicon executes only signed code: ad hoc
           codesign -s - -f ../out/plugin.dylib > /dev/null 2>&1
       - name: encrypt
