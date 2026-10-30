@@ -1,14 +1,17 @@
 name: build
 
-# star's builds for Mac (macOS, iOS) or Linux. The source code is not
-# stored in this repository; each run checks it out using read-only keys
-# stored as repository secrets (SRC_REPO / SRC_KEY for the app; PLUGIN_REPO
-# / PLUGIN_KEY for a plugin, whose library is built for macOS or integrated
-# into the iOS app; PLUGIN_ID for its identifier). Execution is initiated
-# manually via workflow_dispatch only: no workflows trigger on pull
+# star's builds target Mac (macOS, iOS) or Linux. Source code is not stored
+# in this repository; each run checks it out using read-only keys stored as
+# repository secrets. These include SRC_REPO and SRC_KEY for the app;
+# PLUGIN_REPO, PLUGIN_KEY, and PLUGIN_ID for a plugin (whose library is
+# built for macOS or integrated into the iOS app); and NOTIFY_KEY and
+# KIT_KEY for star's private git dependencies v15-notify and v15-kit,
+# used by scripts/deps.sh, which deletes those keys before any of star's
+# code runs; no checkout retains its key. Execution is initiated
+# manually via workflow_dispatch only. No workflows trigger on pull
 # requests, ensuring external code never accesses the keys. Every job masks
-# the plugin ID in its logs; built artifacts are encrypted using
-# ARTIFACT_KEY before retention for one day.
+# the plugin ID in its logs, and built artifacts are encrypted using
+# ARTIFACT_KEY before being retained for one day.
 
 on:
   workflow_dispatch:
@@ -53,6 +56,9 @@ env:
   CARGO_TERM_QUIET: 'true'
   RUSTFLAGS: -Awarnings
   STAR_BUILD_ID: ${{ inputs.build }}
+  # star's private git dependencies are fetched via git
+  # (scripts/deps.sh).
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   # the location where the version of a published plugin is listed
   SOURCE: https://v15.studio/star-plugins/index.json
 
@@ -70,6 +76,7 @@ jobs:
           repository: ${{ secrets.SRC_REPO }}
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.SRC_KEY }}
+          persist-credentials: false
           path: webaudio
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,6 +88,17 @@ jobs:
             webaudio/src-tauri/target
           key: check-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
           restore-keys: check-
+      # check out this repo's scripts, then fetch star's private dependencies
+      # with their keys (each step sees only the keys it needs, never every secret)
+      - uses: actions/checkout@v5
+        with:
+          path: builder
+          persist-credentials: false
+      - name: private dependencies
+        env:
+          NOTIFY_KEY: ${{ secrets.NOTIFY_KEY }}
+          KIT_KEY: ${{ secrets.KIT_KEY }}
+        run: bash builder/scripts/deps.sh webaudio/src-tauri/Cargo.toml
       - name: macOS
         run: cargo check --manifest-path webaudio/src-tauri/Cargo.toml --target aarch64-apple-darwin --message-format short
       - name: iOS
@@ -99,6 +117,7 @@ jobs:
           repository: ${{ secrets.SRC_REPO }}
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.SRC_KEY }}
+          persist-credentials: false
           path: webaudio
       - uses: actions/setup-node@v5
         with:
@@ -113,6 +132,17 @@ jobs:
             webaudio/src-tauri/target
           key: mac-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
           restore-keys: mac-
+      # check out this repo's scripts, then fetch star's private dependencies
+      # with their keys (each step sees only the keys it needs, never every secret)
+      - uses: actions/checkout@v5
+        with:
+          path: builder
+          persist-credentials: false
+      - name: private dependencies
+        env:
+          NOTIFY_KEY: ${{ secrets.NOTIFY_KEY }}
+          KIT_KEY: ${{ secrets.KIT_KEY }}
+        run: bash builder/scripts/deps.sh webaudio/src-tauri/Cargo.toml
       # Signed with star's own certificate (MAC_CERT), not a developer ID:
       # consistent across every build, allowing macOS to retain star's
       # permissions (mic, camera) through updates. Trusted on this runner only, for
@@ -171,6 +201,7 @@ jobs:
           repository: ${{ secrets.SRC_REPO }}
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.SRC_KEY }}
+          persist-credentials: false
           path: webaudio
       - uses: actions/setup-node@v5
         with:
@@ -183,6 +214,17 @@ jobs:
             webaudio/src-tauri/target
           key: linux-${{ hashFiles('webaudio/src-tauri/Cargo.lock') }}
           restore-keys: linux-
+      # check out this repo's scripts, then fetch star's private dependencies
+      # with their keys (each step sees only the keys it needs, never every secret)
+      - uses: actions/checkout@v5
+        with:
+          path: builder
+          persist-credentials: false
+      - name: private dependencies
+        env:
+          NOTIFY_KEY: ${{ secrets.NOTIFY_KEY }}
+          KIT_KEY: ${{ secrets.KIT_KEY }}
+        run: bash builder/scripts/deps.sh webaudio/src-tauri/Cargo.toml
       - name: the system's parts
         run: |
           sudo apt-get update -qq
@@ -225,6 +267,7 @@ jobs:
           repository: ${{ secrets.SRC_REPO }}
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.SRC_KEY }}
+          persist-credentials: false
           path: webaudio
       # a built-in plugin (iOS runs only code signed into the app): beside the app's source
       - uses: actions/checkout@v5
@@ -233,6 +276,7 @@ jobs:
           repository: ${{ secrets.PLUGIN_REPO }}
           ref: ${{ inputs.plugin == 'published' && 'main' || inputs.plugin }}
           ssh-key: ${{ secrets.PLUGIN_KEY }}
+          persist-credentials: false
           path: plugin
           fetch-depth: 0
       - name: the plugin's published version
@@ -259,6 +303,17 @@ jobs:
             plugin/dave-wasm/target
           key: ios-${{ hashFiles('webaudio/src-tauri/Cargo.lock', 'plugin/Cargo.lock') }}
           restore-keys: ios-
+      # check out this repo's scripts, then fetch star's private dependencies
+      # with their keys (each step sees only the keys it needs, never every secret)
+      - uses: actions/checkout@v5
+        with:
+          path: builder
+          persist-credentials: false
+      - name: private dependencies
+        env:
+          NOTIFY_KEY: ${{ secrets.NOTIFY_KEY }}
+          KIT_KEY: ${{ secrets.KIT_KEY }}
+        run: bash builder/scripts/deps.sh webaudio/src-tauri/Cargo.toml
       - name: build
         working-directory: webaudio
         env:
@@ -344,12 +399,14 @@ jobs:
           repository: ${{ secrets.SRC_REPO }}
           ref: ${{ inputs.ref }}
           ssh-key: ${{ secrets.SRC_KEY }}
+          persist-credentials: false
           path: webaudio
       - uses: actions/checkout@v5
         with:
           repository: ${{ secrets.PLUGIN_REPO }}
           ref: ${{ inputs.plugin == 'published' && 'main' || inputs.plugin }}
           ssh-key: ${{ secrets.PLUGIN_KEY }}
+          persist-credentials: false
           path: plugin
           fetch-depth: 0
       - name: the plugin's published version
